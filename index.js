@@ -1,3 +1,11 @@
+const mongoose = require('mongoose');
+const User = require('./User');
+
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('✅ Đã kết nối MongoDB Atlas thành công!'))
+  .catch(err => console.error('❌ Lỗi kết nối MongoDB:', err));
+
+
 const { Client, GatewayIntentBits } = require('discord.js');
 const { QuickDB } = require('quick.db');
 const db = new QuickDB();
