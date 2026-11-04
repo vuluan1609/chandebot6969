@@ -1,14 +1,15 @@
+require('dotenv').config();
+
 const mongoose = require('mongoose');
-const User = require('./User');
+const User = require('./User'); // Khai báo model User để thao tác với database đám mây
+const History = require('./History');
 
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅ Đã kết nối MongoDB Atlas thành công!'))
-  .catch(err => console.error('❌ Lỗi kết nối MongoDB:', err));
-
-
+// Kết nối đến MongoDB Atlas qua biến môi trường trên Render
+mongoose.connect("mongodb+srv://dungluanly_db_user:VuLuan.1609@chandebot.n01ywd2.mongodb.net/chandebot_db?retryWrites=true&w=majority")
+.then(() => console.log('✅ Đã kết nối MongoDB Atlas thành công!'))
+.catch(err => console.error('❌ Lỗi kết nối MongoDB:', err));
 const { Client, GatewayIntentBits } = require('discord.js');
-const { QuickDB } = require('quick.db');
-const db = new QuickDB();
+
 
 const client = new Client({
     intents: [
@@ -17,6 +18,7 @@ const client = new Client({
         GatewayIntentBits.MessageContent,
     ]
 });
+
 
 const PREFIX = '!';
 
@@ -49,15 +51,19 @@ client.on('messageCreate', async (message) => {
     const userId = message.author.id;
 
     // --- MỤC 1: ĐIỂM DANH (QUÁ 48 TIẾNG MỚI RESET CHUỖI) ---
+// --- MỤC 1: ĐIỂM DANH (QUÁ 48 TIẾNG MỚI RESET CHUỖI) ---
     if (command === 'diemdanh') {
-        const lastDaily = await db.get(`daily_${userId}`);
-        let streak = (await db.get(`streak_${userId}`)) || 0;
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, balance: 0, bank: 0, streak: 0 });
+        }
+
         const now = Date.now();
         const oneDay = 86400000; // 24 giờ
         const maxDelay = oneDay * 2; // 48 giờ
 
-        if (lastDaily !== null) {
-            const timeDiff = now - lastDaily;
+        if (userData.lastDaily !== null) {
+            const timeDiff = now - userData.lastDaily;
 
             if (timeDiff < oneDay) {
                 const timeLeft = oneDay - timeDiff;
@@ -67,28 +73,28 @@ client.on('messageCreate', async (message) => {
             } 
             
             if (timeDiff > maxDelay) {
-                streak = 0; 
+                userData.streak = 0; 
             }
         }
 
-        streak += 1;
+        userData.streak += 1;
         const baseReward = 36000;
-        const bonusReward = (streak - 1) * 1000;
+        const bonusReward = (userData.streak - 1) * 1000;
         const totalReward = baseReward + bonusReward;
 
-        const currentMoney = (await db.get(`money_${userId}`)) || 0;
-        await db.set(`money_${userId}`, currentMoney + totalReward);
-        await db.set(`daily_${userId}`, now);
-        await db.set(`streak_${userId}`, streak);
+        userData.balance += totalReward;
+        userData.lastDaily = now;
+        await userData.save(); // Lưu thẳng lên MongoDB Atlas
 
-        if (streak === 1 && lastDaily !== null) {
+        if (userData.streak === 1 && userData.lastDaily !== null && userData.streak === 1) {
             return message.reply(`⚠️ Bạn đã bỏ quên hơn 48 tiếng không điểm danh nên chuỗi ngày đã bị reset!\n🎉 Điểm danh lại ngày 1, nhận **${totalReward.toLocaleString()} xu** từ chan đê.`);
         }
 
-        return message.reply(`🔥 **${message.author.username}** điểm danh ngày thứ **${streak} liên tiếp**!\n💰 Nhận được **${totalReward.toLocaleString()} xu** (Cơ bản 36k + ${bonusReward.toLocaleString()} xu chuyên cần).`);
+        return message.reply(`🔥 **${message.author.username}** điểm danh ngày thứ **${userData.streak} liên tiếp**!\n💰 Nhận được **${totalReward.toLocaleString()} xu** (Cơ bản 36k + ${bonusReward.toLocaleString()} xu chuyên cần).`);
     }
 
     // --- MỤC 2: TÍNH NĂNG CHUYỂN TIỀN ---
+   // --- MỤC 2: TÍNH NĂNG CHUYỂN TIỀN ---
     if (command === 'chuyentien' || command === 'pay') {
         const target = message.mentions.users.first();
         const amountStr = args[1]; 
@@ -108,15 +114,28 @@ client.on('messageCreate', async (message) => {
             return message.reply('❌ Vui lòng nhập số tiền hợp lệ cần chuyển! Ví dụ: `!chuyentien @User 50000`');
         }
 
-        const senderBalance = (await db.get(`money_${userId}`)) || 0;
-        if (senderBalance < amount) {
-            return message.reply(`❌ Ví của bạn không đủ tiền! Bạn chỉ đang có **${senderBalance.toLocaleString()} xu** thôi.`);
+        // Tìm người gửi trong DB
+        let senderData = await User.findOne({ userId });
+        if (!senderData) {
+            senderData = await User.create({ userId, balance: 0 });
         }
 
-        const targetBalance = (await db.get(`money_${target.id}`)) || 0;
+        if (senderData.balance < amount) {
+            return message.reply(`❌ Ví của bạn không đủ tiền! Bạn chỉ đang có **${senderData.balance.toLocaleString()} xu** thôi.`);
+        }
 
-        await db.set(`money_${userId}`, senderBalance - amount);
-        await db.set(`money_${target.id}`, targetBalance + amount);
+        // Tìm người nhận trong DB, nếu chưa có thì tạo mới
+        let targetData = await User.findOne({ userId: target.id });
+        if (!targetData) {
+            targetData = await User.create({ userId: target.id, balance: 0 });
+        }
+
+        // Trừ tiền người gửi và cộng tiền người nhận, sau đó lưu lại
+        senderData.balance -= amount;
+        targetData.balance += amount;
+
+        await senderData.save();
+        await targetData.save();
 
         return message.reply(`💸 **${message.author.username}** đã chuyển thành công **${amount.toLocaleString()} xu** cho <@${target.id}>! 🎉`);
     }
@@ -126,11 +145,15 @@ client.on('messageCreate', async (message) => {
     // 1. Lệnh gửi tiền vào ngân hàng: !gui <số tiền> hoặc !gui all
     if (command === 'gui' || command === 'deposit') {
         const amountStr = args[0];
-        const walletMoney = (await db.get(`money_${userId}`)) || 0;
-        let amount;
+        
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, balance: 0, bank: 0 });
+        }
 
+        let amount;
         if (amountStr === 'all') {
-            amount = walletMoney;
+            amount = userData.balance;
         } else {
             amount = parseInt(amountStr);
         }
@@ -139,30 +162,29 @@ client.on('messageCreate', async (message) => {
             return message.reply('❌ Vui lòng nhập số tiền muốn gửi hợp lệ! Ví dụ: `!gui 1000` hoặc `!gui all`');
         }
 
-        if (walletMoney < amount) {
-            return message.reply(`❌ Ví của bạn không đủ tiền! Bạn chỉ có **${walletMoney.toLocaleString()} xu** trong ví thôi.`);
+        if (userData.balance < amount) {
+            return message.reply(`❌ Ví của bạn không đủ tiền! Bạn chỉ có **${userData.balance.toLocaleString()} xu** trong ví thôi.`);
         }
 
-        await updateBankInterest(userId, db);
+        userData.balance -= amount;
+        userData.bank += amount;
+        await userData.save();
 
-        await db.set(`money_${userId}`, walletMoney - amount);
-        const currentBank = (await db.get(`bank_${userId}`)) || 0;
-        await db.set(`bank_${userId}`, currentBank + amount);
-
-        return message.reply(`🏦 Đã gửi thành công **${amount.toLocaleString()} xu** vào ngân hàng chan đê! (Tiền gửi sẽ tự động sinh lãi 3.6%/24h).`);
+        return message.reply(`🏦 Đã gửi thành công **${amount.toLocaleString()} xu** vào ngân hàng chan đê!`);
     }
 
     // 2. Lệnh rút tiền từ ngân hàng: !rut <số tiền> hoặc !rut all
     if (command === 'rut' || command === 'withdraw') {
         const amountStr = args[0];
         
-        await updateBankInterest(userId, db);
-        
-        const bankMoney = (await db.get(`bank_${userId}`)) || 0;
-        let amount;
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, balance: 0, bank: 0 });
+        }
 
+        let amount;
         if (amountStr === 'all') {
-            amount = bankMoney;
+            amount = userData.bank;
         } else {
             amount = parseInt(amountStr);
         }
@@ -171,27 +193,25 @@ client.on('messageCreate', async (message) => {
             return message.reply('❌ Vui lòng nhập số tiền muốn rút hợp lệ! Ví dụ: `!rut 50000` hoặc `!rut all`');
         }
 
-        if (bankMoney < amount) {
-            return message.reply(`❌ Ngân hàng của bạn không đủ tiền! Bạn chỉ đang gửi **${bankMoney.toLocaleString()} xu** thôi.`);
+        if (userData.bank < amount) {
+            return message.reply(`❌ Ngân hàng của bạn không đủ tiền! Bạn chỉ đang gửi **${userData.bank.toLocaleString()} xu** thôi.`);
         }
 
-        await db.set(`bank_${userId}`, bankMoney - amount);
-        const currentWallet = (await db.get(`money_${userId}`)) || 0;
-        await db.set(`money_${userId}`, currentWallet + amount);
+        userData.bank -= amount;
+        userData.balance += amount;
+        await userData.save();
 
         return message.reply(`🏧 Đã rút thành công **${amount.toLocaleString()} xu** từ ngân hàng về ví cá nhân!`);
     }
+
 
     // --- MỤC 4: HỆ THỐNG SHOP NHẪN ---
 
     // 1. Lệnh xem cửa hàng nhẫn: !shopnhan
     if (command === 'shopnhan') {
-        let shopText = `💍 **CỬA HÀNG NHẪN CHAN ĐÊ** 💍
-Cách mua: \`!muanhan <mã_nhẫn>\`
-
-`;
+        let shopText = `💍 **CỬA HÀNG NHẪN CHAN ĐÊ** 💍\nCách mua: \`!muanhan <mã_nhẫn>\`\n\n`;
         for (const [id, ring] of Object.entries(ringShop)) {
-            shopText += `🔹 **Mã:** \`${id}\` | **${ring.name}** - 💰 **${ring.price.toLocaleString()} xu**\n   └ *${ring.desc}*\n\n`;
+            shopText += `🔹 **Mã:** \`${id}\` | **${ring.name}** - 💰 **${ring.price.toLocaleString()} xu**\n  └ *${ring.desc}*\n\n`;
         }
         return message.reply(shopText);
     }
@@ -204,43 +224,53 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
         }
 
         const ring = ringShop[ringId];
-        const walletMoney = (await db.get(`money_${userId}`)) || 0;
 
-        if (walletMoney < ring.price) {
-            return message.reply(`❌ Ví của bạn không đủ tiền! Nhẫn **${ring.name}** có giá **${ring.price.toLocaleString()} xu**, nhưng bạn chỉ có **${walletMoney.toLocaleString()} xu** trong ví.`);
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, balance: 0, inventory: [] });
         }
 
-        const hasRing = await db.get(`inv_${userId}_${ringId}`);
-        if (hasRing) {
+        if (userData.balance < ring.price) {
+            return message.reply(`❌ Ví của bạn không đủ tiền! Nhẫn **${ring.name}** có giá **${ring.price.toLocaleString()} xu**, nhưng bạn chỉ có **${userData.balance.toLocaleString()} xu** trong ví.`);
+        }
+
+        // Kiểm tra xem trong mảng inventory đã có mã nhẫn này chưa
+        if (userData.inventory.includes(ringId)) {
             return message.reply(`⚠️ Bạn đã sở hữu chiếc **${ring.name}** này trong kho đồ rồi mà!`);
         }
 
-        await db.set(`money_${userId}`, walletMoney - ring.price);
-        await db.set(`inv_${userId}_${ringId}`, true);
+        userData.balance -= ring.price;
+        userData.inventory.push(ringId);
+        await userData.save();
 
         return message.reply(`🎉 Chúc mừng **${message.author.username}** đã mua thành công **${ring.name}** với giá **${ring.price.toLocaleString()} xu**! Đã cất vào kho đồ.`);
     }
-// --- MỤC 5: LỆNH XEM KHO ĐỒ (!kho) ---
-    if (command === 'kho' || command === 'inventory') {
-        let inventoryText = `🎒 **TÚI ĐỒ CỦA ${message.author.username.toUpperCase()}** 🎒\n\n`;
-        let hasAnyRing = false;
 
-        // Duyệt qua toàn bộ danh sách nhẫn trong shop để kiểm tra xem người dùng đã sở hữu chưa
-        for (const [id, ring] of Object.entries(ringShop)) {
-            const owned = await db.get(`inv_${userId}_${id}`);
-            if (owned) {
-                inventoryText += `💍 **${ring.name}** (Mã: \`${id}\`)\n   └ *${ring.desc}*\n\n`;
-                hasAnyRing = true;
-            }
+    // --- MỤC 5: LỆNH XEM KHO ĐỒ (!kho) ---
+    if (command === 'kho' || command === 'inventory') {
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, inventory: [] });
         }
 
-        if (!hasAnyRing) {
+        let inventoryText = `🎒 **TÚI ĐỒ CỦA ${message.author.username.toUpperCase()}** 🎒\n\n`;
+
+        if (!userData.inventory || userData.inventory.length === 0) {
             inventoryText += `*(Túi đồ đang trống rỗng, chưa có chiếc nhẫn nào. Hãy ghé \`!shopnhan\` để sắm ngay nhé!)*`;
+        } else {
+            for (const ringId of userData.inventory) {
+                const ring = ringShop[ringId];
+                if (ring) {
+                    inventoryText += `💍 **${ring.name}** (Mã: \`${ringId}\`)\n  └ *${ring.desc}*\n\n`;
+                }
+            }
         }
 
         return message.reply(inventoryText);
     }
-    // --- MỤC 6: HỆ THỐNG KẾT HÔN (!cauhon) ---
+
+
+   // --- MỤC 6: HỆ THỐNG KẾT HÔN (!cauhon) ---
     if (command === 'cauhon' || command === 'marry') {
         const target = message.mentions.users.first();
         const ringId = args[1]?.toLowerCase();
@@ -258,14 +288,18 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
             return message.reply('❌ Mã nhẫn không hợp lệ! Gõ `!shopnhan` để xem danh sách nhẫn và mã nhẫn nhé.');
         }
 
-        // Kiểm tra xem người cầu hôn có thực sự sở hữu chiếc nhẫn này trong kho không
-        const hasRing = await db.get(`inv_${userId}_${ringId}`);
-        if (!hasRing) {
+        // Lấy thông tin user từ MongoDB
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, inventory: [] });
+        }
+
+        // Kiểm tra xem người cầu hôn có sở hữu chiếc nhẫn này trong kho không
+        if (!userData.inventory || !userData.inventory.includes(ringId)) {
             const ringInfo = ringShop[ringId];
             return message.reply(`❌ Bạn chưa sở hữu chiếc **${ringInfo.name}** này trong túi đồ (` + '`!kho`' + `)! Hãy ra shop sắm ngay trước khi ngỏ lời nhé.`);
         }
 
-        // Kiểm tra xem 2 người đã kết hôn chưa (tùy chọn mở rộng sau này, tạm thời bỏ qua nếu chưa làm DB kết hôn)
         const ring = ringShop[ringId];
 
         // Tạo 2 nút bấm: Đồng ý và Từ chối
@@ -297,10 +331,20 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
 
         collector.on('collect', async i => {
             if (i.customId === acceptButtonId) {
-                // ĐỒNG Ý KẾT HÔN -> Xóa nhẫn khỏi kho của người cầu hôn (hoặc giữ lại tùy ý bạn, ở đây mình trừ nhẫn làm sính lễ)
-                await db.delete(`inv_${userId}_${ringId}`);
-                await db.set(`married_${userId}`, target.id);
-                await db.set(`married_${target.id}`, userId);
+                // ĐỒNG Ý KẾT HÔN -> Xóa nhẫn khỏi kho người cầu hôn và cập nhật trạng thái kết hôn cho cả 2
+                let senderData = await User.findOne({ userId });
+                if (senderData && senderData.inventory) {
+                    senderData.inventory = senderData.inventory.filter(r => r !== ringId);
+                    senderData.marriedTo = target.id;
+                    await senderData.save();
+                }
+
+                let targetData = await User.findOne({ userId: target.id });
+                if (!targetData) {
+                    targetData = await User.create({ userId: target.id });
+                }
+                targetData.marriedTo = userId;
+                await targetData.save();
 
                 await i.update({
                     content: `🎉 **CHÚC MỪNG HẠNH PHÚC!** 🎉\n\n<@${target.id}> đã **ĐỒNG Ý** lời cầu hôn của **${message.author.username}** với tín vật sính lễ là **${ring.name}**! Chúc hai bạn trăm năm hạnh phúc! 💖`,
@@ -351,15 +395,16 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
             return message.reply('❌ Vui lòng nhập số tiền muốn vay hợp lệ! Ví dụ: `!vay @ChuNo 100000`');
         }
 
-        // Kiểm tra xem chủ nợ có đủ tiền trong ví không trước khi gửi yêu cầu
-        const lenderWallet = (await db.get(`money_${targetUser.id}`)) || 0;
+        // Lấy thông tin ví của chủ nợ
+        let lenderData = await User.findOne({ userId: targetUser.id });
+        const lenderWallet = lenderData ? lenderData.balance : 0;
+
         if (lenderWallet < amount) {
             return message.reply(`⚠️ <@${targetUser.id}> hiện tại chỉ có **${lenderWallet.toLocaleString()} xu** trong ví, không đủ số tiền bạn muốn vay!`);
         }
 
-        // Tạo 2 nút bấm: Đồng ý (Green) và Từ chối (Red) sử dụng Component Builder của Discord.js
+        // Tạo 2 nút bấm: Đồng ý và Từ chối
         const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-        
         const acceptId = `accept_loan_${userId}_${targetUser.id}_${amount}_${Date.now()}`;
         const denyId = `deny_loan_${userId}_${targetUser.id}_${amount}_${Date.now()}`;
 
@@ -371,49 +416,44 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
         const requestMsg = await message.reply({
             content: `📜 **PHIẾU YÊU CẦU VAY TIỀN**\n` +
                      `- Người mượn: <@${userId}>\n` +
-                     `- Người được hỏi mượn (Chủ nợ): <targetUser>\n` + // Sửa hiển thị tag đúng
+                     `- Chủ nợ: <@${targetUser.id}>\n` +
                      `- Số tiền muốn vay: **${amount.toLocaleString()} xu**\n\n` +
-                     `⏳ <@${targetUser.id}>, bạn có đồng ý cho mượn không? (Hiệu lực trong 3 phút)`,
+                     `⏳ <@${targetUser.id}>, vui lòng bấm nút bên dưới để quyết định! (Hiệu lực trong 3 phút)`,
             components: [row]
         });
 
-        // Đính chính lại hiển thị tên chủ nợ trong nội dung gửi đi cho chuẩn
-        await requestMsg.edit({
-            content: `📜 **PHIẾU YÊU CẦU VAY TIỀN**\n` +
-                     `- Người mượn: <@${userId}>\n` +
-                     `- Chủ nợ: <@${targetUser.id}>\n` +
-                     `- Số tiền muốn vay: **${amount.toLocaleString()} xu**\n\n` +
-                     `⏳ <@${targetUser.id}>, vui lòng bấm nút bên dưới để quyết định! (Hiệu lực trong 3 phút)`
-        });
-
-        // Tạo Collector lắng nghe sự kiện bấm nút trong 3 phút (180,000ms)
         const filter = i => i.user.id === targetUser.id && (i.customId === acceptId || i.customId === denyId);
         const collector = requestMsg.createMessageComponentCollector({ filter, time: 180000 });
 
         collector.on('collect', async i => {
             if (i.customId === acceptId) {
                 // Kiểm tra lại tiền của chủ nợ lúc bấm nút
-                const currentLenderWallet = (await db.get(`money_${targetUser.id}`)) || 0;
-                if (currentLenderWallet < amount) {
+                let currentLender = await User.findOne({ userId: targetUser.id });
+                if (!currentLender || currentLender.balance < amount) {
                     await i.update({ content: `❌ Giao dịch thất bại! Ví của <@${targetUser.id}> không đủ tiền để giải ngân nữa.`, components: [] });
                     return;
                 }
 
-                // Thực hiện chuyển tiền: Trừ ví chủ nợ, cộng ví con nợ
-                const borrowerWallet = (await db.get(`money_${userId}`)) || 0;
-                await db.set(`money_${targetUser.id}`, currentLenderWallet - amount);
-                await db.set(`money_${userId}`, borrowerWallet + amount);
+                // Lấy thông tin con nợ
+                let borrower = await User.findOne({ userId });
+                if (!borrower) {
+                    borrower = await User.create({ userId, balance: 0 });
+                }
 
-                // Lưu khoản nợ
-                const currentDebt = (await db.get(`debt_${userId}_to_${targetUser.id}`)) || 0;
-                await db.set(`debt_${userId}_to_${targetUser.id}`, currentDebt + amount);
+                // Trừ tiền chủ nợ, cộng tiền con nợ
+                currentLender.balance -= amount;
+                borrower.balance += amount;
 
-                // Cập nhật danh sách liên kết
-                let lenders = (await db.get(`lenders_${userId}`)) || [];
-                if (!lenders.includes(targetUser.id)) { lenders.push(targetUser.id); await db.set(`lenders_${userId}`, lenders); }
+                // Cập nhật sổ nợ (thêm hoặc cộng dồn khoản nợ của borrower với lender)
+                let debtRecord = borrower.debts.find(d => d.lenderId === targetUser.id);
+                if (debtRecord) {
+                    debtRecord.amount += amount;
+                } else {
+                    borrower.debts.push({ lenderId: targetUser.id, borrowerId: userId, amount: amount });
+                }
 
-                let debtors = (await db.get(`debtors_${targetUser.id}`)) || [];
-                if (!debtors.includes(userId)) { debtors.push(userId); await db.set(`debtors_${targetUser.id}`, debtors); }
+                await currentLender.save();
+                await borrower.save();
 
                 await i.update({
                     content: `✅ **GIẢI NGÂN THÀNH CÔNG!** <@${targetUser.id}> đã đồng ý cho <@${userId}> vay **${amount.toLocaleString()} xu**. 🤝`,
@@ -442,30 +482,32 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
 
     // 2. Lệnh kiểm tra sổ nợ cá nhân: !no
     if (command === 'no' || command === 'debt') {
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId });
+        }
+
         let responseText = `📜 **SỔ NỢ CỦA BẠN (<@${userId}>):**\n\n`;
 
-        const myLenders = (await db.get(`lenders_${userId}`)) || [];
         responseText += `🔴 **Các khoản bạn đang nợ:**\n`;
-        if (myLenders.length === 0) {
+        if (!userData.debts || userData.debts.length === 0) {
             responseText += `  - Trộm vía, bạn không nợ ai cả! Rất uy tín. 🎉\n`;
         } else {
-            for (const lenderId of myLenders) {
-                const debtAmount = (await db.get(`debt_${userId}_to_${lenderId}`)) || 0;
-                if (debtAmount > 0) {
-                    responseText += `  - Nợ <@${lenderId}>: \`${debtAmount.toLocaleString()} xu\`\n`;
-                }
+            for (const d of userData.debts) {
+                responseText += `  - Nợ <@${d.lenderId}>: \`${d.amount.toLocaleString()} xu\`\n`;
             }
         }
 
+        // Tìm những người đang nợ mình
+        const debtors = await User.find({ "debts.lenderId": userId });
         responseText += `\n🟢 **Những người đang nợ tiền bạn:**\n`;
-        const myDebtors = (await db.get(`debtors_${userId}`)) || [];
-        if (myDebtors.length === 0) {
+        if (debtors.length === 0) {
             responseText += `  - Không có ai mượn tiền bạn cả.\n`;
         } else {
-            for (const debtorId of myDebtors) {
-                const creditAmount = (await db.get(`debt_${debtorId}_to_${userId}`)) || 0;
-                if (creditAmount > 0) {
-                    responseText += `  - <@${debtorId}> đang nợ bạn: \`${creditAmount.toLocaleString()} xu\`\n`;
+            for (const debtor of debtors) {
+                const debtItem = debtor.debts.find(d => d.lenderId === userId);
+                if (debtItem && debtItem.amount > 0) {
+                    responseText += `  - <@${debtor.userId}> đang nợ bạn: \`${debtItem.amount.toLocaleString()} xu\`\n`;
                 }
             }
         }
@@ -484,7 +526,14 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
         }
 
         const lenderId = targetUser.id;
-        const currentDebt = (await db.get(`debt_${userId}_to_${lenderId}`)) || 0;
+
+        let borrower = await User.findOne({ userId });
+        if (!borrower) {
+            borrower = await User.create({ userId });
+        }
+
+        let debtRecord = borrower.debts.find(d => d.lenderId === lenderId);
+        const currentDebt = debtRecord ? debtRecord.amount : 0;
 
         if (currentDebt <= 0) {
             return message.reply(`❌ Bạn có đang nợ <@${lenderId}> đồng nào đâu mà trả!`);
@@ -495,163 +544,197 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
             return message.reply(`❌ Vui lòng nhập số tiền muốn trả hợp lệ! Khoản nợ hiện tại: **${currentDebt.toLocaleString()} xu**.`);
         }
 
-        const myWallet = (await db.get(`money_${userId}`)) || 0;
-        if (myWallet < amount) {
-            return message.reply(`❌ Ví của bạn không đủ tiền! Bạn đang có **${myWallet.toLocaleString()} xu**.`);
+        if (borrower.balance < amount) {
+            return message.reply(`❌ Ví của bạn không đủ tiền! Bạn đang có **${borrower.balance.toLocaleString()} xu**.`);
         }
 
         const payAmount = Math.min(amount, currentDebt);
 
-        const lenderWallet = (await db.get(`money_${lenderId}`)) || 0;
-        await db.set(`money_${userId}`, myWallet - payAmount);
-        await db.set(`money_${lenderId}`, lenderWallet + payAmount);
-
-        const remainingDebt = currentDebt - payAmount;
-        await db.set(`debt_${userId}_to_` + lenderId, remainingDebt);
-
-        if (remainingDebt === 0) {
-            await db.delete(`debt_${userId}_to_${lenderId}`);
-
-            let myLenders = (await db.get(`lenders_${userId}`)) || [];
-            myLenders = myLenders.filter(id => id !== lenderId);
-            await db.set(`lenders_${userId}`, myLenders);
-
-            let lenderDebtors = (await db.get(`debtors_${lenderId}`)) || [];
-            lenderDebtors = lenderDebtors.filter(id => id !== userId);
-            await db.set(`debtors_${lenderId}`, lenderDebtors);
+        let lender = await User.findOne({ userId: lenderId });
+        if (!lender) {
+            lender = await User.create({ userId: lenderId });
         }
 
+        // Trừ ví con nợ, cộng ví chủ nợ
+        borrower.balance -= payAmount;
+        lender.balance += payAmount;
+
+        // Cập nhật lại số tiền nợ
+        debtRecord.amount -= payAmount;
+
+        // Nếu đã trả sạch nợ thì xóa khỏi mảng debts
+        if (debtRecord.amount <= 0) {
+            borrower.debts = borrower.debts.filter(d => d.lenderId !== lenderId);
+        }
+
+        await borrower.save();
+        await lender.save();
+
+        const remainingDebt = debtRecord.amount > 0 ? debtRecord.amount : 0;
         return message.reply(`🎉 Bạn đã trả thành công **${payAmount.toLocaleString()} xu** cho <@${lenderId}>! Khoản nợ còn lại: \`${remainingDebt.toLocaleString()} xu\`.`);
     }
 
-    // --- MỤC 9: MINIGAME TÀI XỈU CÓ HIỆU ỨNG LẮC (!taixiu <Tài/Xỉu> <số_tiền>) ---
-    if (command === 'taixiu' || command === 'tx') {
-        const choice = args[0]?.toLowerCase();
-        const amountStr = args[1];
+   // --- MỤC 9: MINIGAME TÀI XỈU CÓ HIỆU ỨNG LẮC & LƯU LỊCH SỬ (!taixiu <Tài/Xỉu> <số_tiền>) ---
+if (command === 'taixiu' || command === 'tx') {
+    const choice = args[0]?.toLowerCase();
+    const amountStr = args[1];
 
-        if (!choice || (choice !== 'tai' && choice !== 'xiu')) {
-            return message.reply('❌ Cú pháp không đúng! Vui lòng dùng: `!taixiu tài <số_tiền>` hoặc `!taixiu xỉu <số_tiền>` (Tối thiểu 10,000 xu).');
-        }
-
-        const wallet = (await db.get(`money_${userId}`)) || 0;
-        let betAmount;
-
-        if (amountStr === 'all' || amountStr === 'allin') {
-            betAmount = wallet;
-        } else {
-            betAmount = parseInt(amountStr);
-        }
-
-        if (isNaN(betAmount) || betAmount <= 0) {
-            return message.reply('❌ Vui lòng nhập số tiền cược hợp lệ! Ví dụ: `!taixiu tai 50000` hoặc `!taixiu xiu all`');
-        }
-
-        const minBet = 10000;
-        if (betAmount < minBet && wallet >= minBet) {
-            return message.reply(`❌ Mức cược tối thiểu cho mỗi ván Tài Xỉu là **${minBet.toLocaleString()} xu** nhé!`);
-        }
-
-        if (wallet < betAmount) {
-            return message.reply(`❌ Ví của bạn không đủ tiền! Bạn chỉ đang có **${wallet.toLocaleString()} xu** trong ví thôi.`);
-        }
-
-        // 1. Gửi tin nhắn hiệu ứng đang lắc ban đầu
-        const rollMessage = await message.reply(`🎲 **Bát đang được xóc...**\n- Người chơi: **${message.author.username}** chọn **${choice.toUpperCase()}** (${betAmount.toLocaleString()} xu)\n- Xí ngầu đang quay: 🎲 🎲 🎲`);
-
-        // Hàm tạo độ trễ (delay) tính bằng mili-giây
-        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-        // 2. Chạy hiệu ứng xoay xí ngầu giả lập trong khoảng 2.5 giây
-        const rollingFrames = [
-            '⚀ ⚂ ⚄', '⚁ ⚃ ⚅', '⚄ ⚀ ⚂', '⚅ ⚁ ⚃', '⚂ ⚄ ⚀'
-        ];
-
-        for (let i = 0; i < 3; i++) {
-            await sleep(600); // Đợi 0.6 giây mỗi khung hình
-            const randomFrame = rollingFrames[Math.floor(Math.random() * rollingFrames.length)];
-            await rollMessage.edit(`🎲 **Sòng Tài Xỉu đang mở bát...**\n- Người chơi: **${message.author.username}** chọn **${choice.toUpperCase()}** (${betAmount.toLocaleString()} xu)\n- Xí ngầu đang quay: [ ${randomFrame} ]`);
-        }
-
-        // 3. Ra kết quả chính thức
-        const dice1 = Math.floor(Math.random() * 6) + 1;
-        const dice2 = Math.floor(Math.random() * 6) + 1;
-        const dice3 = Math.floor(Math.random() * 6) + 1;
-        const totalPoints = dice1 + dice2 + dice3;
-
-        let result = '';
-        if (dice1 === dice2 && dice2 === dice3) {
-            result = 'bao'; 
-        } else if (totalPoints >= 3 && totalPoints <= 10) {
-            result = 'xiu';
-        } else {
-            result = 'tai';
-        }
-
-        const diceEmojis = ['', '⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
-        const diceDisplay = `${diceEmojis[dice1]} ${diceEmojis[dice2]} ${diceEmojis[dice3]}`;
-
-        let finalReply = `🎲 **KẾT QUẢ TÀI XỈU** 🎲\n` +
-                         `- Xí ngầu: [ ${diceDisplay} ] (Tổng điểm: **${totalPoints}**)\n`;
-
-        if (result === 'bao') {
-            await db.set(`money_${userId}`, wallet - betAmount);
-            finalReply += `💥 **NỔ BÃO (${dice1}-${dice1}-${dice1})!** Nhà cái ăn hết! Bạn đã mất sạch **${betAmount.toLocaleString()} xu** cược này... 😢`;
-        } else if (choice === result) {
-            await db.set(`money_${userId}`, wallet + betAmount);
-            const winName = result === 'tai' ? 'TÀI' : 'XỈU';
-            finalReply += `🎉 Chúc mừng bạn đã chọn **${choice.toUpperCase()}** và ra kết quả **${winName}**! Bạn nhận được **+${betAmount.toLocaleString()} xu** 💰`;
-        } else {
-            await db.set(`money_${userId}`, wallet - betAmount);
-            const winName = result === 'tai' ? 'TÀI' : 'XỈU';
-            finalReply += `😢 Rất tiếc, kết quả là **${winName}**. Bạn đã thua và mất **${betAmount.toLocaleString()} xu** vào tay nhà cái...`;
-        }
-
-        // Chỉnh sửa tin nhắn ban đầu thành kết quả cuối cùng
-        return rollMessage.edit(finalReply);
+    if (!choice || (choice !== 'tai' && choice !== 'xiu')) {
+        return message.reply('❌ Cú pháp không đúng! Vui lòng dùng: `!taixiu tai <số_tiền>` hoặc `!taixiu xiu <số_tiền>` (Tối thiểu 10,000 xu).');
     }
+
+    let userData = await User.findOne({ userId });
+    if (!userData) {
+        userData = await User.create({ userId, balance: 0 });
+    }
+
+    const wallet = userData.balance;
+    let betAmount;
+
+    if (amountStr === 'all' || amountStr === 'allin') {
+        betAmount = wallet;
+    } else {
+        betAmount = parseInt(amountStr);
+    }
+
+    if (isNaN(betAmount) || betAmount <= 0) {
+        return message.reply('❌ Vui lòng nhập số tiền cược hợp lệ! Ví dụ: `!taixiu tai 50000` hoặc `!taixiu xiu all`');
+    }
+
+    const minBet = 10000;
+    if (betAmount < minBet && wallet >= minBet) {
+        return message.reply(`❌ Mức cược tối thiểu cho mỗi ván Tài Xỉu là **${minBet.toLocaleString()} xu** nhé!`);
+    }
+
+    if (wallet < betAmount) {
+        return message.reply(`❌ Ví của bạn không đủ tiền! Bạn chỉ đang có **${wallet.toLocaleString()} xu** trong ví thôi.`);
+    }
+
+    // 1. Gửi tin nhắn hiệu ứng đang lắc ban đầu
+    const rollMessage = await message.reply(`🎲 **Bát đang được xóc...**\nNgười chơi: **${message.author.username}** chọn **${choice.toUpperCase()}** (${betAmount.toLocaleString()} xu)\nXí ngầu đang quay: 🎲 🎲 🎲`);
+
+    // Hàm tạo độ trễ (delay) tính bằng mili-giây
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    // 2. Chạy hiệu ứng xoay xí ngầu giả lập trong khoảng 3 giây
+    const rollingFrames = [
+        '⚀ ⚂ ⚄', '⚁ ⚃ ⚅', '⚄ ⚀ ⚂', '⚅ ⚁ ⚃', '⚂ ⚄ ⚀'
+    ];
+
+    for (let i = 0; i < 5; i++) {
+        await sleep(600); // Đợi 0.6 giây mỗi khung hình
+        const randomFrame = rollingFrames[Math.floor(Math.random() * rollingFrames.length)];
+        await rollMessage.edit(`🎲 **Sòng Tài Xỉu đang mở bát...**\nNgười chơi: **${message.author.username}** chọn **${choice.toUpperCase()}** (${betAmount.toLocaleString()} xu)\nXí ngầu đang quay: [ ${randomFrame} ]`);
+    }
+
+    // 3. Ra kết quả chính thức
+    const dice1 = Math.floor(Math.random() * 6) + 1;
+    const dice2 = Math.floor(Math.random() * 6) + 1;
+    const dice3 = Math.floor(Math.random() * 6) + 1;
+    const totalPoints = dice1 + dice2 + dice3;
+
+    let result = '';
+    if (dice1 === dice2 && dice2 === dice3) {
+        result = 'bao'; 
+    } else if (totalPoints >= 3 && totalPoints <= 10) {
+        result = 'xiu';
+    } else {
+        result = 'tai';
+    }
+
+    const diceEmojis = ['', '⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
+    const diceDisplay = `${diceEmojis[dice1]} ${diceEmojis[dice2]} ${diceEmojis[dice3]}`;
+
+    let finalReply = `🎲 **KẾT QUẢ TÀI XỈU** 🎲\n` +
+                     `- Xí ngầu: [ ${diceDisplay} ] (Tổng điểm: **${totalPoints}**)\n`;
+
+    // Cập nhật lại số dư vào MongoDB tùy theo thắng/thua
+    userData = await User.findOne({ userId });
+
+    if (result === 'bao') {
+        userData.balance -= betAmount;
+        finalReply += `💥 **NỔ BÃO (${dice1}-${dice1}-${dice1})!** Nhà cái ăn hết! Bạn đã mất sạch **${betAmount.toLocaleString()} xu** cược này... 😢`;
+    } else if (choice === result) {
+        userData.balance += betAmount;
+        const winName = result === 'tai' ? 'TÀI' : 'XỈU';
+        finalReply += `🎉 Chúc mừng bạn đã chọn **${choice.toUpperCase()}** và ra kết quả **${winName}**! Bạn nhận được **+${betAmount.toLocaleString()} xu** 💰`;
+    } else {
+        userData.balance -= betAmount;
+        const winName = result === 'tai' ? 'TÀI' : 'XỈU';
+        finalReply += `😢 Rất tiếc, kết quả là **${winName}**. Bạn đã thua và mất **${betAmount.toLocaleString()} xu** vào tay nhà cái...`;
+    }
+
+    await userData.save();
+
+    // 4. LƯU KẾT QUẢ VÀO HISTORY ĐỂ PHỤC VỤ LỆNH !soicau
+    let history = await History.findOne({ serverKey: 'global' });
+    if (!history) {
+        history = new History({ serverKey: 'global', results: [] });
+    }
+
+    let recordResult = result;
+    if (result === 'bao') {
+        recordResult = 'xiu'; // Nếu bão thì quy đổi tạm sang xỉu để ghi nhận cầu
+    }
+
+    history.results.push(recordResult);
+    if (history.results.length > 20) {
+        history.results.shift(); 
+    }
+    await history.save();
+
+    // Chỉnh sửa tin nhắn ban đầu thành kết quả cuối cùng
+    return rollMessage.edit(finalReply);
+}
+
+// --- MỤC 10: LỆNH SOI CẦU ĐẶC BIỆT (!soicau) ---
+if (command === 'soicau') {
+    let history = await History.findOne({ serverKey: 'global' });
+    if (!history || history.results.length === 0) {
+        return message.reply('📊 Chưa có dữ liệu lịch sử tài xỉu nào! Hãy chơi vài ván `!taixiu` trước nhé.');
+    }
+
+    const recentResults = history.results.slice(-10);
+    const visualResults = recentResults.map(r => r === 'tai' ? '🔴' : '🔵').join(' ');
+    const taiCount = recentResults.filter(r => r === 'tai').length;
+    const xiuCount = recentResults.filter(r => r === 'xiu').length;
+
+    return message.reply(
+        `📊 **BẢNG SOI CẦU TÀI XỈU (${recentResults.length} ván gần nhất)** 📊\n` +
+        `├ Chuỗi cầu: ${visualResults}\n` +
+        `├ Thống kê: 🔴 **Tài**: ${taiCount} | 🔵 **Xỉu**: ${xiuCount}\n` +
+        `└ 💡 *Xu hướng:* Cầu đang nghiêng về **${taiCount >= xiuCount ? 'TÀI 🔴' : 'XỈU 🔵'}**!`
+    );
+}
 
     // --- MỤC 10: BẢNG XẾP HẠNG TOP GIÀU CÓ (!top / !rich / !leaderboard) ---
     if (command === 'top' || command === 'rich' || command === 'leaderboard') {
-        // Lấy danh sách tất cả các khóa trong QuickDB để tìm dữ liệu ví và ngân hàng
-        // Lưu ý: Cách tối ưu nhất với QuickDB là quét các user đã tương tác
-        const allRows = await db.all();
-        
-        let userNetWorths = {};
+        // Lấy toàn bộ danh sách user từ MongoDB, sắp xếp theo tổng (balance + bank) giảm dần và lấy top 10
+        const users = await User.find({});
 
-        // Duyệt qua database để tính tổng tài sản (Ví + Ngân hàng) của từng user
-        for (const row of allRows) {
-            // Định dạng key trong DB thường là: money_<userId> hoặc bank_<userId>
-            if (row.id.startsWith('money_')) {
-                const uId = row.id.replace('money_', '');
-                if (!userNetWorths[uId]) userNetWorths[uId] = { wallet: 0, bank: 0 };
-                userNetWorths[uId].wallet = row.value || 0;
-            }
-            if (row.id.startsWith('bank_')) {
-                const uId = row.id.replace('bank_', '');
-                if (!userNetWorths[uId]) userNetWorths[uId] = { wallet: 0, bank: 0 };
-                userNetWorths[uId].bank = row.value || 0;
-            }
+        if (!users || users.length === 0) {
+            return message.reply(`🏆 **BẢNG XẾP HẠNG TÀI SẢN:** Hiện tại chưa có dữ liệu người dùng nào trong hệ thống!`);
         }
 
-        // Tính tổng tài sản (net worth) cho từng người chơi và chuyển thành mảng
-        let leaderboardArray = [];
-        for (const [uId, data] of Object.entries(userNetWorths)) {
-            const totalWealth = data.wallet + data.bank;
-            if (totalWealth > 0) {
-                leaderboardArray.push({
-                    userId: uId,
-                    wallet: data.wallet,
-                    bank: data.bank,
-                    total: totalWealth
-                });
-            }
-        }
+        let leaderboardArray = users.map(u => {
+            const wallet = u.balance || 0;
+            const bank = u.bank || 0;
+            return {
+                userId: u.userId,
+                wallet: wallet,
+                bank: bank,
+                total: wallet + bank
+            };
+        });
+
+        // Lọc bỏ những ai có tổng tài sản bằng 0 (nếu muốn) hoặc giữ lại tất cả
+        leaderboardArray = leaderboardArray.filter(p => p.total > 0);
 
         if (leaderboardArray.length === 0) {
             return message.reply(`🏆 **BẢNG XẾP HẠNG TÀI SẢN:** Hiện tại chưa có ai có tiền trong tài khoản cả!`);
         }
 
-        // Sắp xếp giảm dần theo tổng tài sản (giàu nhất đứng đầu)
+        // Sắp xếp giảm dần theo tổng tài sản
         leaderboardArray.sort((a, b) => b.total - a.total);
 
         // Lấy top 10 người giàu nhất
@@ -664,12 +747,13 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
         for (const player of topPlayers) {
             const medal = medals[rank] || `\`#${rank + 1}\``;
             lbText += `${medal} <@${player.userId}>\n` +
-                      `   - Tổng tài sản: **${player.total.toLocaleString()} xu** (Ví: \`${player.wallet.toLocaleString()}\` | Bank: \`${player.bank.toLocaleString()}\`)\n\n`;
+                      `  - Tổng tài sản: **${player.total.toLocaleString()} xu** (Ví: \`${player.wallet.toLocaleString()}\` | Bank: \`${player.bank.toLocaleString()}\`)\n\n`;
             rank++;
         }
 
         return message.reply(lbText);
     }
+
 
     // --- MỤC 11: LỆNH HƯỚNG DẪN ĐA TẦNG (!help [danh_mục]) ---
     if (command === 'help' || command === 'giup' || command === 'h') {
@@ -681,7 +765,7 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
                 `💰 **HƯỚNG DẪN: KINH TẾ & TÀI CHÍNH** 💰\n` +
                 `• \`!diemdanh\` - Điểm danh nhận thưởng hàng ngày (Reset nếu quá 48h).\n` +
                 `• \`!profile\` (hoặc \`!me\`, \`!tt\`) - Xem hồ sơ, ví, ngân hàng, streak, nhẫn.\n` +
-                `• \`!gui <số_tiền>\` - Gửi tiền tiết kiệm (Lãi suất 3.6%/24h).\n` +
+                `• \`!gui <số_tiền>\` - Gửi tiền tiết kiệm vào ngân hàng.\n` +
                 `• \`!rut <số_tiền>\` - Rút tiền tiết kiệm về ví.\n` +
                 `• \`!chuyentien @User <số_tiền>\` - Chuyển xu cho người khác.\n` +
                 `• \`!top\` (hoặc \`!rich\`) - Bảng xếp hạng top 10 đại gia server.`
@@ -702,102 +786,156 @@ Cách mua: \`!muanhan <mã_nhẫn>\`
         // 3. Nhóm Cho vay & Vay tiền P2P
         if (subCommand === 'vayno' || subCommand === 'debt') {
             return message.reply(
-                `🤝 **HƯỚNG DẪN: VAY MƯỢN P2P (GIỮA NGƯỜI CHƠI VỚI NHAU)** 🤝\n` +
-                `• \`!vay @ChủNợ <số_tiền>\` - Gửi phiếu mượn tiền (Chủ nợ sẽ nhận được nút [Đồng ý] / [Từ chối]).\n` +
-                `• \`!no\` - Kiểm tra danh sách bạn đang nợ ai và ai đang nợ tiền bạn.\n` +
-                `• \`!trano @ChủNợ <số_tiền>\` - Thanh toán trả nợ trực tiếp cho chủ nợ.`
+                `🤝 **HƯỚNG DẪN: VAY MƯỢN P2P** 🤝\n` +
+                `• \`!vay @ChủNợ <số_tiền>\` - Gửi phiếu yêu cầu vay tiền (chủ nợ bấm nút đồng ý).\n` +
+                `• \`!no\` (hoặc \`!debt\`) - Kiểm tra sổ nợ cá nhân (ai đang nợ mình, mình đang nợ ai).\n` +
+                `• \`!trano @ChủNợ <số_tiền>\` - Trả nợ trực tiếp cho chủ nợ.`
             );
         }
 
         // 4. Nhóm Minigame
-        if (subCommand === 'game' || subCommand === 'minigame') {
+        if (subCommand === 'game' || subCommand === 'taixiu') {
             return message.reply(
-                `🎲 **HƯỚNG DẪN: KHO MINIGAME GIẢI TRÍ** 🎲\n` +
-                `• \`!taixiu tài <số_tiền>\` (hoặc \`!tx xiu all\`) - Chơi Tài Xỉu cược tối thiểu 10k xu (Có hiệu ứng lắc xúc xắc).\n` +
-                `*(💡 Các minigame mới sẽ sớm được cập nhật tại đây trong tương lai!)*`
+                `🎲 **HƯỚNG DẪN: MINIGAME TÀI XỈU** 🎲\n` +
+                `• \`!taixiu tai <số_tiền>\` (hoặc \`!tx tai <số_tiền>\`) - Cược cửa Tài (hoặc gõ \`all\` / \`allin\`).\n` +
+                `• \`!taixiu xiu <số_tiền>\` - Cược cửa Xỉu (Tối thiểu 10,000 xu).`
             );
         }
 
-        // Mặc định: Hiển thị Menu tổng quan khi gõ !help
-        const mainHelpText = `📖 **MENU TỔNG QUAN - BOT CHAN ĐÊ** 📖\n` +
-                             `Gõ các lệnh chi tiết dưới đây để xem hướng dẫn từng phân khu:\n\n` +
-                             `• \`!help kinhte\` ➔ Quản lý ví, ngân hàng, điểm danh, chuyển tiền, top giàu.\n` +
-                             `• \`!help cuoihoi\` ➔ Shop nhẫn, kiểm tra kho đồ, cầu hôn.\n` +
-                             `• \`!help vayno\` ➔ Vay mượn tiền người chơi khác qua nút duyệt, sổ nợ, trả nợ.\n` +
-                             `• \`!help game\` ➔ Các minigame cá cược (Tài Xỉu, ...).\n\n` +
-                             `✨ *Con bot kinh tế chan đê đã hoàn thiện đầy đủ mọi tính năng cốt lõi!*`;
-
-        return message.reply(mainHelpText);
+        // Giao diện Help tổng quan nếu không nhập danh mục
+        return message.reply(
+            `📖 **HỆ THỐNG TRỢ GIÚP BOT CHAN ĐÊ** 📖\n` +
+            `Gõ \`!help <danh_mục>\` để xem chi tiết từng nhóm lệnh:\n\n` +
+            `🔹 \`!help kinhte\` - Kinh tế, điểm danh, ví, ngân hàng, chuyển tiền, top.\n` +
+            `🔹 \`!help cuoihoi\` - Shop nhẫn, túi đồ, kết hôn.\n` +
+            `🔹 \`!help vayno\` - Vay mượn tiền P2P giữa các người chơi.\n` +
+            `🔹 \`!help game\` - Minigame Tài Xỉu xí ngầu.`
+        );
     }
 
-    // --- LỆNH WORK (1 tiếng / lần, nhận 10.000 xu) ---
-if (command === 'work') {
-    const userId = message.author.id;
-    const cooldownTime = 60 * 60 * 1000; // 1 giờ tính bằng mili-giây
-    const lastWorkTime = (await db.get(`work_time_${userId}`)) || 0;
-    const now = Date.now();
 
-    // Kiểm tra thời gian cooldown (1 tiếng)
-    if (now - lastWorkTime < cooldownTime) {
-        const remainingTime = cooldownTime - (now - lastWorkTime);
-        const minutesLeft = Math.ceil(remainingTime / (60 * 1000));
-        return message.reply(`⏱️ Bạn vừa đi làm rồi! Vui lòng đợi thêm **${minutesLeft} phút** nữa mới được làm tiếp nhé.`);
+
+   // --- MỤC: LỆNH KIẾM TIỀN / LÀM VIỆC (!work) ---
+    if (command === 'work') {
+    let user = await User.findOne({ userId: message.author.id });
+    if (!user) {
+        user = new User({ userId: message.author.id, balance: 0, lastWork: 0 });
     }
 
-    const earnAmount = 10000;
-    const currentWallet = (await db.get(`money_${userId}`)) || 0;
+    const cooldownTime = 60 * 60 * 1000; // 1 giờ (tính bằng mili-giây)
+    const timeLeft = cooldownTime - (Date.now() - user.lastWork);
 
-    // Cộng tiền và lưu mốc thời gian làm việc mới
-    await db.set(`money_${userId}`, currentWallet + earnAmount);
-    await db.set(`work_time_${userId}`, now);
+    if (timeLeft > 0) {
+        const minutesLeft = Math.ceil(timeLeft / (60 * 1000));
+        return message.reply(`⏳ Bạn vừa đi làm rồi! Vui lòng đợi thêm **${minutesLeft} phút** nữa mới được đi làm tiếp nhé.`);
+    }
 
-    return message.reply(`💼 Bạn đã nhận được **${earnAmount.toLocaleString()} xu**.`);
+    // Cộng cố định 50,000 xu sau khi hết thời gian chờ
+    const earnings = 50000;
+    user.balance += earnings;
+    user.lastWork = Date.now();
+    await user.save();
+
+    return message.reply(`🛠️ Bạn đã đi làm chăm chỉ và kiếm được **${earnings.toLocaleString()} xu**! Tổng số dư ví hiện tại: **${user.balance.toLocaleString()} xu**.`);
 }
 
-// --- LỆNH XEM TÀI KHOẢN / SỐ DƯ VÍ (profile / vi) ---
-if (command === 'profile' || command === 'vi' || command === 'balance') {
-    const userId = message.author.id;
-    const currentWallet = (await db.get(`money_${userId}`)) || 0;
+// --- LỆNH XEM HỒ SƠ CÁ NHÂN (!me / !profile) ---
+    if (command === 'me' || command === 'profile' || command === 'tt') {
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, balance: 0, bank: 0, streak: 0, inventory: [] });
+        }
 
-    return message.reply(`💰 Ví của bạn hiện đang có: **${currentWallet.toLocaleString()} xu**.`);
-}
+        const wallet = userData.balance || 0;
+        const bank = userData.bank || 0;
+        const total = wallet + bank;
+        
+        let marriageStatus = 'Độc thân vui vẻ 🍃';
+        if (userData.marriedTo) {
+            marriageStatus = `Đã kết hôn với <@${userData.marriedTo}> 💍`;
+        }
 
+        return message.reply(
+            `📊 **HỒ SƠ CÁ NHÂN CỦA ${message.author.username.toUpperCase()}**\n\n` +
+            `💰 Ví: \`${wallet.toLocaleString()} xu\`\n` +
+            `🏦 Ngân hàng: \`${bank.toLocaleString()} xu\`\n` +
+            `💎 Tổng tài sản: **${total.toLocaleString()} xu**\n` +
+            `💍 Tình trạng: ${marriageStatus}`
+        );
+    }
+
+    // --- LỆNH XEM NHANH SỐ DƯ VÍ (!vi) ---
+    if (command === 'vi' || command === 'wallet') {
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, balance: 0 });
+        }
+
+        const wallet = userData.balance || 0;
+        return message.reply(`💰 Ví của bạn hiện đang có: **${wallet.toLocaleString()} xu**.`);
+    }
+
+    // --- LỆNH XEM NHANH SỐ DƯ NGÂN HÀNG (!bank) ---
+    if (command === 'bank' || command === 'nganhang') {
+        let userData = await User.findOne({ userId });
+        if (!userData) {
+            userData = await User.create({ userId, bank: 0 });
+        }
+
+        const bank = userData.bank || 0;
+        return message.reply(`🏦 Ngân hàng của bạn hiện đang gửi: **${bank.toLocaleString()} xu**.`);
+    }
 
 
 }); // <-- KẾT THÚC SỰ KIỆN MESSAGE_CREATE Ở ĐÂY
 
 
 // ==========================================
-// HÀM TÍNH LÃI SUẤT NGÂN HÀNG (ĐẶT Ở ĐÁY FILE)
-// ==========================================
-async function updateBankInterest(userId, db) {
-    const bankMoney = (await db.get(`bank_${userId}`)) || 0;
-    if (bankMoney <= 0) {
-        await db.set(`bank_last_time_${userId}`, Date.now());
-        return;
+// --- HÀM TÍNH LÃI SUẤT NGÂN HÀNG TỰ ĐỘNG CHO TẤT CẢ USER ---
+async function updateBankInterest() {
+    try {
+        const users = await User.find({ bank: { $gt: 0 } }); // Chỉ lấy những user có tiền trong ngân hàng
+        const now = Date.now();
+
+        for (let user of users) {
+            // Nếu chưa có mốc thời gian tính lãi (lastInterestTime), gán bằng thời điểm hiện tại
+            if (!user.lastInterestTime) {
+                user.lastInterestTime = now;
+                await user.save();
+                continue;
+            }
+
+            const hoursPassed = (now - user.lastInterestTime) / (1000 * 60 * 60);
+
+            // Cứ qua 1 tiếng thì tính lãi một lần
+            if (hoursPassed >= 1) {
+                const hoursToCalculate = Math.floor(hoursPassed);
+                const hourlyRate = 0.036 / 24; // Lãi suất ví dụ (có thể điều chỉnh tùy ý)
+                
+                let totalInterest = 0;
+                for (let i = 0; i < hoursToCalculate; i++) {
+                    totalInterest += user.bank * hourlyRate;
+                }
+
+                if (totalInterest > 0) {
+                    user.bank = Math.floor(user.bank + totalInterest);
+                }
+
+                // Cập nhật lại mốc thời gian tính lãi (giữ lại phần dư thời gian chưa đủ tiếng)
+                user.lastInterestTime = now - ((hoursPassed - hoursToCalculate) * 1000 * 60 * 60);
+                await user.save();
+            }
+        }
+    } catch (error) {
+        console.error('❌ Lỗi khi tính lãi suất ngân hàng:', error);
     }
-
-    const lastTime = (await db.get(`bank_last_time_${userId}`)) || Date.now();
-    const now = Date.now();
-    const hoursPassed = (now - lastTime) / (1000 * 60 * 60);
-
-    if (hoursPassed < 1) return;
-
-    const hourlyRate = 0.036 / 24; 
-    let totalInterest = 0;
-
-    for (let i = 0; i < Math.floor(hoursPassed); i++) {
-        totalInterest += bankMoney * hourlyRate;
-    }
-
-    if (totalInterest > 0) {
-        const newBankMoney = Math.floor(bankMoney + totalInterest);
-        await db.set(`bank_${userId}`, newBankMoney);
-    }
-
-    const remainingTime = now - (Math.floor(hoursPassed) * 3600000);
-    await db.set(`bank_last_time_${userId}`, remainingTime);
 }
+
+// Gọi hàm định kỳ (Ví dụ: Cứ mỗi 1 tiếng chạy tính lãi 1 lần)
+setInterval(updateBankInterest, 60 * 60 * 1000);
+
+
+
 
 // Đăng nhập bot (luôn ở dòng cuối cùng)
 client.login(process.env.DISCORD_TOKEN);
